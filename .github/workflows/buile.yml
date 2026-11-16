@@ -5,22 +5,21 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive # 关键：拉取项目依赖的子模块
+          submodules: recursive
 
       - name: Set up Xcode
         run: |
-          # 项目可能对 Xcode 版本有要求，这里使用较新的 Xcode 15.4
-          sudo xcode-select -s /Applications/Xcode_15.4.app
+          # macos-15 自带 Xcode 16.x，这里切换到 16.1 或更高版本
+          sudo xcode-select -s /Applications/Xcode_16.1.app
           xcodebuild -version
 
       - name: Build Dependencies
         run: |
-          # 如果项目里有自定义的依赖编译脚本，在这里执行它
           if [ -f "scripts/build-airlift-xcframework.sh" ]; then
             chmod +x scripts/build-airlift-xcframework.sh
             ./scripts/build-airlift-xcframework.sh
@@ -28,7 +27,6 @@ jobs:
 
       - name: Build and Package
         run: |
-          # 编译项目并禁用签名
           xcodebuild -project AirBeep.xcodeproj \
             -scheme AirBeep \
             -sdk iphoneos \
@@ -38,7 +36,6 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO
             
-          # 打包成 IPA
           mkdir -p Payload
           mv build/Build/Products/Release-iphoneos/*.app Payload/
           zip -r AirBeep-Custom.ipa Payload
