@@ -1,0 +1,29 @@
+name: Build AirBeep IPA
+
+on:
+  workflow_dispatch: # 允许你手动点击运行
+
+jobs:
+  build:
+    runs-on: macos-14 # 使用 GitHub 免费的 Mac 服务器
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build and Package
+        run: |
+          # 编译项目，禁用签名
+          xcodebuild -project AirBeep.xcodeproj -scheme AirBeep -sdk iphoneos -configuration Release -derivedDataPath ./build CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO
+          
+          # 创建 IPA 包结构
+          mkdir -p Payload
+          # 将编译出的 .app 移动进 Payload
+          mv build/Build/Products/Release-iphoneos/*.app Payload/
+          # 压缩成 zip 并改名为 ipa
+          zip -r AirBeep-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirBeep-IPA
+          path: AirBeep-unsigned.ipa
