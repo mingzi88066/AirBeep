@@ -14,12 +14,19 @@ jobs:
 
       - name: Set up Xcode
         run: |
-          # macos-15 自带 Xcode 16.x，这里切换到 16.1 或更高版本
-          sudo xcode-select -s /Applications/Xcode_16.1.app
+          # macos-15 默认自带 Xcode 16.x，这里打印版本以确认
           xcodebuild -version
 
       - name: Build Dependencies
         run: |
+          # 1. 安装 Rust 工具链
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+          
+          # 2. 安装 iOS 交叉编译所需的 Target
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          
+          # 3. 执行项目自带的 Airlift 编译脚本
           if [ -f "scripts/build-airlift-xcframework.sh" ]; then
             chmod +x scripts/build-airlift-xcframework.sh
             ./scripts/build-airlift-xcframework.sh
@@ -27,6 +34,7 @@ jobs:
 
       - name: Build and Package
         run: |
+          # 编译项目并禁用签名
           xcodebuild -project AirBeep.xcodeproj \
             -scheme AirBeep \
             -sdk iphoneos \
@@ -36,6 +44,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO
             
+          # 打包成 IPA 格式
           mkdir -p Payload
           mv build/Build/Products/Release-iphoneos/*.app Payload/
           zip -r AirBeep-Custom.ipa Payload
