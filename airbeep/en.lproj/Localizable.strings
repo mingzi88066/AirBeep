@@ -84,6 +84,9 @@
 "Reset to default" = "Reset to default";
 "Enter a valid IPv4 address, e.g. 10.7.0.1" = "Enter a valid IPv4 address, e.g. 10.7.0.1";
 "Each part of the address must be between 0 and 255." = "Each part of the address must be between 0 and 255.";
+"Launch" = "Launch";
+"Silence automatically when the app opens" = "Silence automatically when the app opens";
+"Applies the silence as soon as the app opens, without tapping the button. Turn this off to run it manually." = "Applies the silence as soon as the app opens, without tapping the button. Turn this off to run it manually.";
 "Current Connection" = "Current Connection";
 "Target" = "Target";
 "Tunnel" = "Tunnel";

@@ -1,21 +1,30 @@
 import SwiftUI
 
-/// Advanced settings for the loopback connection.
+/// Advanced settings: the loopback connection and the launch behaviour.
 ///
 /// The main audience is users whose LocalDevVPN device IP differs from the
 /// build-time default (see issues #5/#7/#8 — connection refused on
 /// 172.16.0.1 / 10.7.0.1). Here they can see the live interface state and set a
-/// custom device IP that is dialed before any tone operation.
+/// custom device IP that is dialed before any tone operation. The launch switch
+/// controls whether opening the app silences the tones by itself.
 struct AirBeepAdvancedSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var customHost: String = TargetHostConfig.custom ?? ""
     @State private var validationError: String?
     @State private var savedNotice: String?
     @State private var interfaces: [NetworkStatus.Interface] = []
+    @AppStorage(AirBeepPreference.autoSilenceOnLaunchKey) private var autoSilenceOnLaunch = true
 
     var body: some View {
         NavigationStack {
             List {
+                Section("Launch") {
+                    Toggle("Silence automatically when the app opens", isOn: $autoSilenceOnLaunch)
+                    Text("Applies the silence as soon as the app opens, without tapping the button. Turn this off to run it manually.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Custom Device IP")

@@ -84,6 +84,9 @@
 "Reset to default" = "已恢复默认";
 "Enter a valid IPv4 address, e.g. 10.7.0.1" = "请输入有效的 IPv4 地址，例如 10.7.0.1";
 "Each part of the address must be between 0 and 255." = "地址的每一段必须在 0 到 255 之间。";
+"Launch" = "启动";
+"Silence automatically when the app opens" = "打开 App 时自动静音";
+"Applies the silence as soon as the app opens, without tapping the button. Turn this off to run it manually." = "打开 App 后自动执行静音，无需手动点击按钮。关闭后可手动执行。";
 "Current Connection" = "当前连接";
 "Target" = "目标地址";
 "Tunnel" = "隧道";

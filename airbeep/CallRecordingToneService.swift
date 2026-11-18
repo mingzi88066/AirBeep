@@ -63,6 +63,20 @@ private enum ToneBackupStateCache {
     }
 }
 
+/// Preferences shared by the service and the settings screen.
+///
+/// Kept in this file rather than a new source file so the Xcode project does
+/// not have to be touched just to add one setting.
+enum AirBeepPreference {
+    static let autoSilenceOnLaunchKey = "AirBeepAutoSilenceOnLaunch"
+
+    /// Defaults to on when the switch was never touched, so a fresh install
+    /// silences the tones as soon as the app opens.
+    static var autoSilenceOnLaunch: Bool {
+        UserDefaults.standard.object(forKey: autoSilenceOnLaunchKey) as? Bool ?? true
+    }
+}
+
 @MainActor
 final class CallRecordingToneService: ObservableObject {
     static let shared = CallRecordingToneService()
@@ -302,6 +316,12 @@ final class CallRecordingToneService: ObservableObject {
     /// wake-up.
     func runLaunchAutomation() async {
         guard !Self.didRunLaunchAutomation else { return }
+
+        guard AirBeepPreference.autoSilenceOnLaunch else {
+            AirBeepLog.shared.append("launch automation: turned off in Advanced settings")
+            return
+        }
+
         Self.didRunLaunchAutomation = true
 
         guard SystemCompatibility.isSupported else {
