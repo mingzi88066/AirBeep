@@ -67,6 +67,11 @@ private enum ToneBackupStateCache {
 final class CallRecordingToneService: ObservableObject {
     static let shared = CallRecordingToneService()
 
+    /// Guards the launch automation so a re-appearing view (sheet dismissal,
+    /// scene reactivation) does not run the silence again. One cold launch
+    /// applies the silence exactly once.
+    private static var didRunLaunchAutomation = false
+
     /// Whether a complete original-tone backup exists on disk. The home screen
     /// reads this to offer "Back Up Original Tones" when false and "Restore
     /// Original Tones" when true. Refreshing it only reads the Documents folder
@@ -208,7 +213,12 @@ final class CallRecordingToneService: ObservableObject {
         }
     }
 
-    func applySilentTone() async {
+    /// Silences the disclosure tones — the orange button action.
+    ///
+    /// `announce` is false when the call comes from the launch automation, so
+    /// the outcome is written to the log and the button state instead of a
+    /// modal "Done" alert on every start.
+    func applySilentTone(announce: Bool = true) async {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
@@ -229,7 +239,8 @@ final class CallRecordingToneService: ObservableObject {
                     // replaced in this run.
                     self.refreshBackupState()
                     self.finishSuccess(
-                        String(localized: "The recording tones are already silent.")
+                        String(localized: "The recording tones are already silent."),
+                        announce: announce
                     )
                     AirBeepLog.shared.append("applySilentTone: already silent")
                     return
@@ -258,7 +269,8 @@ final class CallRecordingToneService: ObservableObject {
                         self.finishSuccess(
                             haveBackup
                                 ? String(localized: "The recording tones were silenced.")
-                                : String(localized: "The recording tones were silenced, but the originals could not be fully backed up. Change the system language once to get them back.")
+                                : String(localized: "The recording tones were silenced, but the originals could not be fully backed up. Change the system language once to get them back."),
+                            announce: announce
                         )
                     } else {
                         // The write channel reported success but the read-back
@@ -266,7 +278,8 @@ final class CallRecordingToneService: ObservableObject {
                         // on some iOS releases). Say so instead of claiming a
                         // verified success, and point at the manual check.
                         self.finishSuccess(
-                            String(localized: "The silence was written, but the result could not be verified automatically. Use \"Check tone status\" to confirm.")
+                            String(localized: "The silence was written, but the result could not be verified automatically. Use \"Check tone status\" to confirm."),
+                            announce: announce
                         )
                     }
                     AirBeepLog.shared.append("applySilentTone: success")
@@ -275,9 +288,30 @@ final class CallRecordingToneService: ObservableObject {
                     throw error
                 }
             } catch {
-                self.reportOperationError(error)
+                self.reportOperationError(error, announce: announce)
             }
         }
+    }
+
+    /// Runs the orange "Silence recording tone" action by itself once per
+    /// cold launch, so opening the app is all it takes.
+    ///
+    /// It stays limited to one run per process: a foregrounded app does not
+    /// need the silence re-applied (the files are already replaced), and
+    /// repeating it would push a full set of reads through the tunnel on every
+    /// wake-up.
+    func runLaunchAutomation() async {
+        guard !Self.didRunLaunchAutomation else { return }
+        Self.didRunLaunchAutomation = true
+
+        guard SystemCompatibility.isSupported else {
+            AirBeepLog.shared.append("launch automation: system not supported, skipped")
+            return
+        }
+
+        AirBeepLog.shared.append("launch automation: applying silence")
+        await applySilentTone(announce: false)
+        AirBeepLog.shared.append("launch automation: finished")
     }
 
     /// Reads the disclosure tones on demand and reports what could be
@@ -400,10 +434,10 @@ final class CallRecordingToneService: ObservableObject {
         backupReady = hasCompleteRequiredBackup()
     }
 
-    private func finishSuccess(_ message: String) {
+    private func finishSuccess(_ message: String, announce: Bool = true) {
         needsAirliftSetup = false
         lastError = nil
-        successMessage = message
+        successMessage = announce ? message : nil
     }
 
     /// Keeps the screen awake and shows a warning banner while an operation
@@ -419,11 +453,14 @@ final class CallRecordingToneService: ObservableObject {
     }
 
 
-    private func reportOperationError(_ error: Error) {
+    private func reportOperationError(_ error: Error, announce: Bool = true) {
         // An incomplete backup is a partial success: what could be read is
         // saved. Keep backupReady as-is so the button state stays accurate.
         needsAirliftSetup = shouldOfferAirliftSetup(for: error)
-        lastError = error.localizedDescription
+        // The launch automation stays quiet when the pairing is missing — the
+        // setup card on the home screen already explains what to do — but any
+        // other failure is still surfaced as an alert.
+        lastError = (announce || !needsAirliftSetup) ? error.localizedDescription : nil
         successMessage = nil
         AirBeepLog.shared.append("operation error: \(error.localizedDescription)")
     }

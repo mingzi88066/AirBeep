@@ -38,6 +38,11 @@ struct AirBeepRootView: View {
         .onAppear {
             service.refresh()
         }
+        .task {
+            // Opening the app is enough: the orange "Silence recording tone"
+            // action runs on its own once per launch.
+            await service.runLaunchAutomation()
+        }
         .sheet(isPresented: $showingAbout) {
             AirBeepAboutView()
         }
