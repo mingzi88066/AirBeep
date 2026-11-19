@@ -3,6 +3,7 @@ import UIKit
 
 struct AirBeepRootView: View {
     @StateObject private var service = CallRecordingToneService.shared
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showingAbout = false
     @State private var showingAirliftSetup = false
 
@@ -13,6 +14,9 @@ struct AirBeepRootView: View {
                     header
                     if let busyMessage = service.busyMessage {
                         busyWarning(message: busyMessage)
+                    }
+                    if let outcome = service.launchOutcome {
+                        launchOutcomeCard(outcome)
                     }
                     if service.needsAirliftSetup {
                         airliftSetupCard
@@ -43,11 +47,18 @@ struct AirBeepRootView: View {
             // action runs on its own once per launch.
             await service.runLaunchAutomation()
         }
+        .onChange(of: scenePhase) { _, phase in
+            // A launch run that failed on a missing tunnel gets one more
+            // chance once the user brings LocalDevVPN up and comes back.
+            guard phase == .active else { return }
+            Task { await service.retryLaunchAutomationIfNeeded() }
+        }
         .sheet(isPresented: $showingAbout) {
             AirBeepAboutView()
         }
         .sheet(isPresented: $showingAirliftSetup, onDismiss: {
             service.refresh()
+            Task { await service.rerunAutomationAfterSetup() }
         }) {
             AirBeepAirliftSetupView()
         }
@@ -224,6 +235,38 @@ struct AirBeepRootView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(Color.red.opacity(0.12), in: .rect(cornerRadius: 16))
+    }
+
+    /// Confirmation for the automatic run at launch. That path skips the modal
+    /// alerts, so this card is where "did it work?" is answered — including the
+    /// reason when it did not.
+    private func launchOutcomeCard(_ outcome: CallRecordingToneService.LaunchOutcome) -> some View {
+        Label {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: outcome.message)
+                    .font(.subheadline.weight(.semibold))
+                Text(verbatim: clockText(outcome.date))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: outcome.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.title3)
+                .foregroundStyle(outcome.succeeded ? Color.green : Color.orange)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            (outcome.succeeded ? Color.green : Color.orange).opacity(0.12),
+            in: .rect(cornerRadius: 16)
+        )
+    }
+
+    /// HH:mm:ss without a shared formatter instance, which strict concurrency
+    /// would flag as non-Sendable.
+    private func clockText(_ date: Date) -> String {
+        let parts = Calendar.current.dateComponents([.hour, .minute, .second], from: date)
+        return String(format: "%02d:%02d:%02d", parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0)
     }
 
     private var airliftSetupCard: some View {

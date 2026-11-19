@@ -104,6 +104,29 @@ final class CallRecordingToneService: ObservableObject {
     @Published private(set) var needsAirliftSetup = false
     @Published private(set) var busyMessage: String?
 
+    /// Outcome of the automatic run at launch. The launch path does not raise
+    /// the modal alerts, so the home screen shows this as a card — it is the
+    /// only confirmation the user gets, and the only place that says why a
+    /// launch run failed.
+    struct LaunchOutcome: Equatable {
+        let succeeded: Bool
+        let message: String
+        let date: Date
+    }
+
+    @Published private(set) var launchOutcome: LaunchOutcome?
+
+    /// Wording of the most recent operation, recorded even when the caller
+    /// asked not to announce it, so the launch card can reuse the exact text.
+    private var lastOperationMessage: String?
+    /// Whether the most recent failure looks transient — the tunnel was not up
+    /// yet, or the connection was refused — which is what the launch
+    /// automation retries.
+    private var lastFailureWasTransient = false
+    /// Set when a launch run failed transiently: the next return to the
+    /// foreground tries once more, typically after the user connected the VPN.
+    private var launchRetryPending = false
+
     private enum AccessBackend {
         case airlift(pairingPath: String)
     }
@@ -230,14 +253,16 @@ final class CallRecordingToneService: ObservableObject {
     /// Silences the disclosure tones — the orange button action.
     ///
     /// `announce` is false when the call comes from the launch automation, so
-    /// the outcome is written to the log and the button state instead of a
-    /// modal "Done" alert on every start.
-    func applySilentTone(announce: Bool = true) async {
-        guard !isBusy else { return }
+    /// the outcome goes to the log and the launch card instead of a modal
+    /// "Done" alert on every start. Returns whether the tone was applied.
+    @discardableResult
+    func applySilentTone(announce: Bool = true) async -> Bool {
+        guard !isBusy else { return false }
         isBusy = true
         defer { isBusy = false }
         AirBeepLog.shared.append("applySilentTone: start")
 
+        var succeeded = false
         await withBusyScreen(String(localized: "Applying silence to call recording tones")) { [self] in
             do {
                 // The interface set may have changed since launch (VPN enabled,
@@ -252,7 +277,7 @@ final class CallRecordingToneService: ObservableObject {
                     // without touching ToneBackupStateCache: nothing was
                     // replaced in this run.
                     self.refreshBackupState()
-                    self.finishSuccess(
+                    succeeded = self.finishSuccess(
                         String(localized: "The recording tones are already silent."),
                         announce: announce
                     )
@@ -280,7 +305,7 @@ final class CallRecordingToneService: ObservableObject {
                     let verified = try await self.writeTones(silent, using: backend)
                     ToneBackupStateCache.save(!haveBackup)
                     if verified {
-                        self.finishSuccess(
+                        succeeded = self.finishSuccess(
                             haveBackup
                                 ? String(localized: "The recording tones were silenced.")
                                 : String(localized: "The recording tones were silenced, but the originals could not be fully backed up. Change the system language once to get them back."),
@@ -291,7 +316,7 @@ final class CallRecordingToneService: ObservableObject {
                         // could not confirm it (the read channel is unreliable
                         // on some iOS releases). Say so instead of claiming a
                         // verified success, and point at the manual check.
-                        self.finishSuccess(
+                        succeeded = self.finishSuccess(
                             String(localized: "The silence was written, but the result could not be verified automatically. Use \"Check tone status\" to confirm."),
                             announce: announce
                         )
@@ -305,6 +330,8 @@ final class CallRecordingToneService: ObservableObject {
                 self.reportOperationError(error, announce: announce)
             }
         }
+
+        return succeeded
     }
 
     /// Runs the orange "Silence recording tone" action by itself once per
@@ -313,7 +340,8 @@ final class CallRecordingToneService: ObservableObject {
     /// It stays limited to one run per process: a foregrounded app does not
     /// need the silence re-applied (the files are already replaced), and
     /// repeating it would push a full set of reads through the tunnel on every
-    /// wake-up.
+    /// wake-up. A failed run is retried from retryLaunchAutomationIfNeeded
+    /// when the app comes back to the foreground.
     func runLaunchAutomation() async {
         guard !Self.didRunLaunchAutomation else { return }
 
@@ -323,15 +351,105 @@ final class CallRecordingToneService: ObservableObject {
         }
 
         Self.didRunLaunchAutomation = true
+        AirBeepLog.shared.append("launch automation: start")
+        await performLaunchAutomation(attempts: 3)
+    }
 
+    /// One more attempt when the app returns to the foreground after a
+    /// transient failure — typically the user left the app to bring up
+    /// LocalDevVPN and came back.
+    func retryLaunchAutomationIfNeeded() async {
+        guard launchRetryPending, !isBusy, AirBeepPreference.autoSilenceOnLaunch else { return }
+        launchRetryPending = false
+        AirBeepLog.shared.append("launch automation: retrying after returning to the foreground")
+        await performLaunchAutomation(attempts: 2)
+    }
+
+    /// Runs again once the pairing sheet is closed: the first launch almost
+    /// always happens before pairing is done, so finishing setup is the moment
+    /// to apply the silence without asking for another tap.
+    func rerunAutomationAfterSetup() async {
+        guard AirBeepPreference.autoSilenceOnLaunch, !isBusy else { return }
+        guard launchOutcome?.succeeded != true else { return }
+        AirBeepLog.shared.append("launch automation: rerunning after setup")
+        await performLaunchAutomation(attempts: 2)
+    }
+
+    /// Waits for the loopback tunnel, then applies the silence, retrying the
+    /// transient failures (tunnel not up yet, connection refused) and
+    /// publishing the outcome for the home screen card.
+    private func performLaunchAutomation(attempts: Int) async {
         guard SystemCompatibility.isSupported else {
+            launchOutcome = LaunchOutcome(
+                succeeded: false,
+                message: CallRecordingToneError.unsupported.localizedDescription,
+                date: Date()
+            )
             AirBeepLog.shared.append("launch automation: system not supported, skipped")
             return
         }
 
-        AirBeepLog.shared.append("launch automation: applying silence")
-        await applySilentTone(announce: false)
-        AirBeepLog.shared.append("launch automation: finished")
+        await withBusyScreen(String(localized: "Applying silence to call recording tones")) { [self] in
+            // LocalDevVPN takes a moment to bring its utun up after a cold
+            // start, so touching the device immediately loses the race.
+            if !NetworkStatus.loopbackTunnelActive {
+                await waitForLoopbackTunnel()
+            }
+
+            var lastMessage = ""
+            for attempt in 1...max(1, attempts) {
+                if attempt > 1 {
+                    try? await Task.sleep(for: .milliseconds(1500))
+                }
+
+                let applied = await applySilentTone(announce: false)
+                lastMessage = lastOperationMessage ?? ""
+
+                if applied {
+                    launchRetryPending = false
+                    launchOutcome = LaunchOutcome(
+                        succeeded: true,
+                        message: lastMessage,
+                        date: Date()
+                    )
+                    AirBeepLog.shared.append("launch automation: success on attempt \(attempt)")
+                    return
+                }
+
+                if !lastFailureWasTransient {
+                    break
+                }
+                AirBeepLog.shared.append("launch automation: attempt \(attempt) failed, retrying")
+            }
+
+            // Retry again when the app is brought back to the foreground, but
+            // only for failures that a later tunnel can actually fix.
+            launchRetryPending = lastFailureWasTransient
+            launchOutcome = LaunchOutcome(
+                succeeded: false,
+                message: lastMessage,
+                date: Date()
+            )
+            AirBeepLog.shared.append("launch automation: failed — \(lastMessage)")
+        }
+    }
+
+    /// Polls the interface table until a loopback tunnel is up. Nothing is
+    /// dialed here, so waiting costs nothing but time.
+    @discardableResult
+    private func waitForLoopbackTunnel(timeout: TimeInterval = 12) async -> Bool {
+        AirBeepLog.shared.append("launch automation: waiting for the loopback tunnel")
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(500))
+            if NetworkStatus.loopbackTunnelActive {
+                NetworkStatus.syncTargetHostsToAirlift()
+                AirBeepLog.shared.append("launch automation: tunnel is up")
+                return true
+            }
+        }
+        AirBeepLog.shared.append("launch automation: tunnel still down after \(Int(timeout))s")
+        return false
     }
 
     /// Reads the disclosure tones on demand and reports what could be
@@ -454,10 +572,19 @@ final class CallRecordingToneService: ObservableObject {
         backupReady = hasCompleteRequiredBackup()
     }
 
-    private func finishSuccess(_ message: String, announce: Bool = true) {
+    /// Records a successful operation. Returns true so callers can report a
+    /// boolean result, and keeps the wording for the launch card even when the
+    /// caller asked not to announce it.
+    @discardableResult
+    private func finishSuccess(_ message: String, announce: Bool = true) -> Bool {
         needsAirliftSetup = false
         lastError = nil
+        lastOperationMessage = message
+        lastFailureWasTransient = false
         successMessage = announce ? message : nil
+        // A manual success supersedes whatever the launch card was reporting.
+        if announce { launchOutcome = nil }
+        return true
     }
 
     /// Keeps the screen awake and shows a warning banner while an operation
@@ -477,12 +604,28 @@ final class CallRecordingToneService: ObservableObject {
         // An incomplete backup is a partial success: what could be read is
         // saved. Keep backupReady as-is so the button state stays accurate.
         needsAirliftSetup = shouldOfferAirliftSetup(for: error)
-        // The launch automation stays quiet when the pairing is missing — the
-        // setup card on the home screen already explains what to do — but any
-        // other failure is still surfaced as an alert.
-        lastError = (announce || !needsAirliftSetup) ? error.localizedDescription : nil
+        lastFailureWasTransient = Self.isTransient(error)
+        lastOperationMessage = error.localizedDescription
+        // A launch failure is reported through the home screen card rather than
+        // a modal alert; a manual action still raises the alert.
+        lastError = announce ? error.localizedDescription : nil
         successMessage = nil
         AirBeepLog.shared.append("operation error: \(error.localizedDescription)")
+    }
+
+    /// Failures that a later tunnel can fix — the ones the launch automation
+    /// retries. Anything else is a real state (unsupported system, missing
+    /// resource) where retrying only wastes the user's time.
+    private static func isTransient(_ error: Error) -> Bool {
+        guard let error = error as? CallRecordingToneError else { return false }
+        switch error {
+        case .pairingRequired, .airliftUnavailable, .airliftFailed,
+             .toneReadFailed, .verificationFailed:
+            return true
+        case .unsupported, .missingTone, .missingBackup, .invalidToneBundle,
+             .languageRestoreRequired, .nothingToBackup, .backupIncomplete:
+            return false
+        }
     }
 
     private func accessBackend() throws -> AccessBackend {
